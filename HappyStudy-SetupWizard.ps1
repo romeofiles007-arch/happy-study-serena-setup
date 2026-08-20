@@ -20,6 +20,10 @@ $DefaultInstall = Join-Path ([Environment]::GetFolderPath('LocalApplicationData'
 $BrandTitle  = 'Happy Study'
 $BrandAuthor = 'by อ.คฑาวุฐ'
 
+# Where tunnel-client is fetched from when it is not shipped beside this script.
+# Overridden by HAPPY_STUDY_CLIENT_URL or a "tunnel client url" line in .env.
+$DefaultClientUrl = 'https://github.com/romeofiles007-arch/happy-study-serena-setup/releases/download/v1.0.0/tunnel-client.zip'
+
 # ---------------------------------------------------------------- palette ----
 $ColHeader = [System.Drawing.Color]::FromArgb(17, 109, 97)
 $ColHeader2= [System.Drawing.Color]::FromArgb(23, 143, 126)
@@ -367,11 +371,16 @@ function Find-CachedTunnelClient {
 }
 
 function Get-TunnelClientDownloadUrl {
+    # Order: environment override, then .env, then the built-in default.  The
+    # default matters because tunnel-client is not stored in git (57 MB of
+    # binaries), so a plain "Download ZIP" of the repository has no bundle and
+    # must still be able to fetch one without the user configuring anything.
     if (-not [string]::IsNullOrWhiteSpace($env:HAPPY_STUDY_CLIENT_URL)) {
         return $env:HAPPY_STUDY_CLIENT_URL.Trim()
     }
     $cfg = Get-ExistingEnvConfiguration
     if (-not [string]::IsNullOrWhiteSpace($cfg.ClientUrl)) { return $cfg.ClientUrl }
+    if (-not [string]::IsNullOrWhiteSpace($DefaultClientUrl)) { return $DefaultClientUrl }
     return $null
 }
 
