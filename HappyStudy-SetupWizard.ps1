@@ -569,6 +569,30 @@ finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPtr) }
 # profiles.  That location changes with HOME / XDG_CONFIG_HOME / APPDATA, which
 # silently broke startup on machines where HOME is set.
 $profilePath = Join-Path $ConfigDir 'tunnel-client.yaml'
+
+# The control plane drops a command - and with it the whole MCP session - once
+# it has been in flight for roughly 143 seconds.  Serena's own tool timeout
+# defaults to 240s, so a hung tool used to outlive the tunnel and take it down.
+# Keeping Serena below the tunnel deadline turns that into an ordinary "tool
+# timed out" answer that ChatGPT can read and work around.
+$serenaArgs = '--context chatgpt --tool-timeout 90'
+
+# Optional: put a Serena project name in config\project.txt and Serena activates
+# it on every start, so a reconnect does not come back with "No active project".
+# tunnel-client re-splits this command string before Serena sees it, and its
+# quoting rules are not worth betting a Windows path on, so only a value without
+# whitespace is passed through - which is what a project name always is.
+$projectFile = Join-Path $ConfigDir 'project.txt'
+if (Test-Path -LiteralPath $projectFile) {
+    $projectName = (Get-Content -LiteralPath $projectFile -Raw).Trim()
+    if ($projectName -match '\s') {
+        Write-Host ('  ข้าม project.txt: ค่ามีช่องว่าง ให้ใส่ "ชื่อโปรเจกต์" แทน path เต็ม') -ForegroundColor Yellow
+    }
+    elseif ($projectName) {
+        $serenaArgs += ' --project ' + $projectName
+    }
+}
+
 @"
 config_version: 1
 control_plane:
@@ -585,7 +609,7 @@ log:
 mcp:
   commands:
     - channel: main
-      command: serena start-mcp-server --context chatgpt
+      command: serena start-mcp-server $serenaArgs
 "@ | Set-Content -LiteralPath $profilePath -Encoding utf8
 
 Write-Host ''
@@ -599,15 +623,48 @@ Write-Host  '  Health : http://127.0.0.1:18010/ui'
 Write-Host ''
 Write-Host '  เปิดหน้าต่างนี้ค้างไว้ขณะใช้งาน ChatGPT' -ForegroundColor Yellow
 Write-Host '  ปิดหน้าต่างนี้ = ตัดการเชื่อมต่อ' -ForegroundColor Yellow
+Write-Host '  ถ้าการเชื่อมต่อหลุด ระบบจะเชื่อมต่อใหม่ให้เองอัตโนมัติ' -ForegroundColor Gray
 Write-Host ''
 
-& $Client run --config $profilePath
-$clientExit = $LASTEXITCODE
+# tunnel-client exits non-zero when the control plane tears down the MCP
+# session mid-flight - most often because a tool call outlived the per-command
+# response_timeout, which closes the stdio child and takes the only routable
+# channel with it.  That is recoverable, so reconnect instead of making the user
+# reopen Start.bat.  A client that dies straight after starting is a real
+# misconfiguration (bad key, port in use), so that case still stops with the
+# error on screen.
+$restarts    = 0
+$maxRestarts = 20
 
-Write-Host ''
-if ($clientExit -ne 0) {
-    Stop-WithMessage ("tunnel-client หยุดทำงานด้วยรหัส " + $clientExit + " (ข้อความ error อยู่ด้านบน)")
+while ($true) {
+    $startedAt = Get-Date
+    & $Client run --config $profilePath
+    $clientExit  = $LASTEXITCODE
+    $ranSeconds  = ((Get-Date) - $startedAt).TotalSeconds
+
+    Write-Host ''
+    if ($clientExit -eq 0) { break }
+
+    if ($ranSeconds -lt 20) {
+        Stop-WithMessage ("tunnel-client หยุดทำงานด้วยรหัส " + $clientExit + " ทันทีหลังเริ่มทำงาน (ข้อความ error อยู่ด้านบน)")
+    }
+
+    # A tunnel that held up for a long stretch before dropping is not a crash
+    # loop, so it does not eat into the reconnect budget.
+    if ($ranSeconds -gt 600) { $restarts = 0 }
+
+    $restarts++
+    if ($restarts -gt $maxRestarts) {
+        Stop-WithMessage ("tunnel-client หยุดทำงานด้วยรหัส " + $clientExit + " และเชื่อมต่อใหม่ครบ " + $maxRestarts + " ครั้งแล้ว (ข้อความ error อยู่ด้านบน)")
+    }
+
+    Write-Host ("  การเชื่อมต่อหลุด (รหัส " + $clientExit + ") - กำลังเชื่อมต่อใหม่ ครั้งที่ " + $restarts + "/" + $maxRestarts) -ForegroundColor Yellow
+    Write-Host '  ไม่ต้องปิดหน้าต่างนี้ ระบบจะกลับมาใช้งานได้เองใน 5 วินาที' -ForegroundColor Gray
+    Write-Host '  ถ้าเพิ่งสั่งงานที่ใช้เวลานานมาก (เช่น pip install) ให้สั่งใหม่อีกครั้งหลังเชื่อมต่อสำเร็จ' -ForegroundColor Gray
+    Write-Host ''
+    Start-Sleep -Seconds 5
 }
+
 Write-Host 'Tunnel หยุดทำงานแล้ว' -ForegroundColor Yellow
 Write-Host 'กด Enter เพื่อปิดหน้าต่างนี้' -ForegroundColor Gray
 [void](Read-Host)
